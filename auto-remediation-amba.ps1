@@ -36,6 +36,10 @@ $policies = @(
     [PSCustomObject]@{
         policyName      = "Notification-Assets"
         managementGroup = $rootManagementGroup
+    },
+    [PSCustomObject]@{
+        policyName      = "Alerting-HybridVM"
+        managementGroup = $rootManagementGroup
     }
 )
 
