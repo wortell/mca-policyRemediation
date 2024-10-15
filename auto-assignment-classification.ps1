@@ -209,11 +209,24 @@ function New-PolicyAssignmentMgSubscription {
             $assignmentParams.Name = $assignmentName
             $assignmentParams.Scope = "/subscriptions/$($subscription.SubscriptionId)"
 
+            # Check if the Policy Assignment doesn't already exist
+            try  {
+                Get-AzPolicyAssignment -Name $assignmentParams.Name -Scope $assignmentParams.Scope -ErrorAction Stop | Out-Null
+                Write-Verbose "Policy assignment '$($assignmentParams.Name)' already exists in subscription '$($subscription.SubscriptionName)'"
+                continue
+            } catch {
+                if ($_.Exception.Message -notmatch "The policy assignment '$($assignmentParams.Name)' is not found.") {
+                    Write-Error "Failed to check if policy assignment '$($assignmentParams.Name)' in subscription '$($subscription.SubscriptionName)' exists.`n$_"
+                    $problemsOccurred = $true
+                    continue # Continue with the next subscription even if one fails
+                }
+            }
+            # If the Policy Assignment doesn't exist, create it
             try {
                 New-AzPolicyAssignment @assignmentParams
             }
             catch {
-                Write-Error "Failed to assign policy '$policyName' to subscription '$($subscription.SubscriptionName)': $_"
+                Write-Error "Failed to assign policy '$policyName' to subscription '$($subscription.SubscriptionName)'.`n$_"
                 $problemsOccurred = $true
                 continue # Continue with the next subscription even if one fails
             }
