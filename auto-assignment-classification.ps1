@@ -203,6 +203,9 @@ function New-PolicyAssignmentMgSubscription {
         foreach ($subscription in $subscriptions) {
             Write-Verbose "Assigning policy '$policyName' to subscription '$($subscription.SubscriptionName)'"
             $assignmentName = "{0}-{1}" -f $policyName, $subscription.SubscriptionName
+            if ($assignmentName -match "&"){
+                $assignmentName = $assignmentName -replace "&", "and"
+            }
             if ($assignmentName.Length -gt 64) {
                 $assignmentName = $assignmentName.Substring(0, 64)
             }
