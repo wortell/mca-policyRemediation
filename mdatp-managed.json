@@ -1,0 +1,16 @@
+{
+    "antivirusEngine":{
+       "enforcementLevel":"real_time",
+       "scanAfterDefinitionUpdate":true,
+       "threatTypeSettings":[
+          {
+             "key":"potentially_unwanted_application",
+             "value":"block"
+          },
+          {
+             "key":"archive_bomb",
+             "value":"audit"
+          }
+       ]
+    }
+ }
