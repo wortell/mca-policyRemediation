@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$identityManagementGroup,
     [Parameter(Mandatory = $true)]
-    [string]$landingZoneManagementGroup
+    [string]$landingZoneManagementGroup,
+    [string]$azureEnvironmentURI = "management.azure.com"
 )
 
 # Define the policies to remediate and the appropriate management groups to remediate them in
@@ -43,25 +44,21 @@ $policies = @(
     }
 )
 
-#region create a variable to make sure no errors have occurred during the run.
-$problemsOccurred = $false
-#endregion
-
-#region load functions
 # Function to trigger remediation for a single policy
 Function Start-PolicyRemediation {
     Param(
+        [Parameter(Mandatory = $true)] [string] $azureEnvironmentURI,
         [Parameter(Mandatory = $true)] [string] $managementGroupName,
         [Parameter(Mandatory = $true)] [string] $policyAssignmentName,
-        [Parameter(Mandatory = $true)] [string] $polassignId,
+        [Parameter(Mandatory = $true)] [string] $policyAssignmentId,
         [Parameter(Mandatory = $false)] [string] $policyDefinitionReferenceId
     )
     $guid = New-Guid
-    #create remediation for the individual policy
-    $uri = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$($managementGroupName)/providers/Microsoft.PolicyInsights/remediations/$($policyName)-$($guid)?api-version=2021-10-01"
+    # Create remediation for the individual policy
+    $uri = "https://$($azureEnvironmentURI)/providers/Microsoft.Management/managementGroups/$($managementGroupName)/providers/Microsoft.PolicyInsights/remediations/$($policyAssignmentName)-$($guid)?api-version=2021-10-01"
     $body = @{
         properties = @{
-            policyAssignmentId = "$polassignId"
+            policyAssignmentId = "$policyAssignmentId"
         }
     }
     if ($policyDefinitionReferenceId) {
@@ -71,58 +68,46 @@ Function Start-PolicyRemediation {
     Invoke-AzRestMethod -Uri $uri -Method PUT -Payload $body
 }
 
-#Function to get the policy assignments in the management group scope
+# Function to get the policy assignments in the management group scope
 function Get-PolicyType {
     Param (
+        [Parameter(Mandatory = $true)] [string] $azureEnvironmentURI,
         [Parameter(Mandatory = $true)] [string] $managementGroupName,
         [Parameter(Mandatory = $true)] [string] $policyName
     )
 
-    #Validate that the management group exists through the Azure REST API
-    $uri = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$($managementGroupName)?api-version=2021-04-01"
+    # Validate that the management group exists through the Azure REST API
+    $uri = "https://$($azureEnvironmentURI)/providers/Microsoft.Management/managementGroups/$($managementGroupName)?api-version=2021-04-01"
     $result = (Invoke-AzRestMethod -Uri $uri -Method GET).Content | ConvertFrom-Json -Depth 100
     if ($result.error) {
         throw "Management group $managementGroupName does not exist, please specify a valid management group name"
     }
 
-    # Getting custom policySetDefinitions
-    $uri = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$($managementGroupName)/providers/Microsoft.Authorization/policySetDefinitions?&api-version=2023-04-01"
+    # Get custom policy set definitions
+    $uri = "https://$($azureEnvironmentURI)/providers/Microsoft.Management/managementGroups/$($managementGroupName)/providers/Microsoft.Authorization/policySetDefinitions?&api-version=2023-04-01"
     $initiatives = (Invoke-AzRestMethod -Uri $uri -Method GET).Content | ConvertFrom-Json -Depth 100
 
-    #Get policy assignments at management group scope
+    # Get policy assignments within the management group
     $assignmentFound = $false
-    $uri = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$($managementGroupName)/providers/Microsoft.Authorization/policyAssignments?`$filter=atScope()&api-version=2022-06-01"
+    $uri = "https://$($azureEnvironmentURI)/providers/Microsoft.Management/managementGroups/$($managementGroupName)/providers/Microsoft.Authorization/policyAssignments?`$filter=atScope()&api-version=2022-06-01"
     $result = (Invoke-AzRestMethod -Uri $uri -Method GET).Content | ConvertFrom-Json -Depth 100
 
-    #iterate through the policy assignments
+    # Iterate through the policy assignments
     $result.value | ForEach-Object {
-        #check if the policy assignment is for the specified policy set definition
+        # Check if the policy assignment matches the specified policy name
         If ($($PSItem.properties.policyDefinitionId) -match "/providers/Microsoft.Authorization/policySetDefinitions/$policyName") {
-            # Go to enumerating policy set
+            # Go to enumerating the policy set
             $assignmentFound = $true
-            Enumerate-PolicySet -managementGroupName $managementGroupName -policyAssignmentObject $PSItem
-        } Elseif ($($PSItem.properties.policyDefinitionId) -match "/providers/Microsoft.Authorization/policyDefinitions/$policyName") {
+            Enumerate-PolicySet -azureEnvironmentURI $azureEnvironmentURI -managementGroupName $managementGroupName -policyAssignmentObject $PSItem
+        }
+        Elseif ($($PSItem.properties.policyDefinitionId) -match "/providers/Microsoft.Authorization/policyDefinitions/$policyName") {
             # Go to handling individual policy
             $assignmentFound = $true
-            Enumerate-Policy -managementGroupName $managementGroupName -policyAssignmentObject $PSItem
-        } Else {
-            # Getting parent initiative for unassigned individual policies
-            If ($initiatives) {
-                $parentInitiative = $initiatives.value | Where-Object {($_.properties.policyType -eq 'Custom') -and ($_.properties.metadata -like '*_deployed_by_amba*')} | Where-Object {$_.properties.policyDefinitions.policyDefinitionReferenceId -eq $policyname}
-
-                # Getting the assignment of the parent initiative
-                If ($parentInitiative) {
-                    If ($($PSItem.properties.policyDefinitionId) -match "/providers/Microsoft.Authorization/policySetDefinitions/$($parentInitiative.name)") {
-                        # Invoking policy remediation
-                        $assignmentFound = $true
-                        Start-PolicyRemediation -managementGroupName $managementGroupName -policyAssignmentName $PSItem.name -polassignId $PSItem.id -policyDefinitionReferenceId $policyName
-                    }
-                }
-            }
+            Enumerate-Policy -azureEnvironmentURI $azureEnvironmentURI -managementGroupName $managementGroupName -policyAssignmentObject $PSItem
         }
     }
 
-    #if no policy assignments were found for the specified policy name, throw an error
+    # If no policy assignments were found for the specified policy name, throw an error
     If (!$assignmentFound) {
         throw "No policy assignments found for policy $policyName at management group scope $managementGroupName"
     }
@@ -131,84 +116,68 @@ function Get-PolicyType {
 # Function to enumerate the policies in the policy set and trigger remediation for each individual policy
 function Enumerate-PolicySet {
     param (
+        [Parameter(Mandatory = $true)] [string] $azureEnvironmentURI,
         [Parameter(Mandatory = $true)] [string] $managementGroupName,
         [Parameter(Mandatory = $true)] [object] $policyAssignmentObject
     )
-    #extract policy assignment information
+
+    # Extract policy assignment information
     $policyAssignmentObject
-    $polassignId = $policyAssignmentObject.id
+    $policyAssignmentId = $policyAssignmentObject.id
     $name = $policyAssignmentObject.name
     $policySetId = $policyAssignmentObject.properties.policyDefinitionId
     $policySetId
-    $psetUri = "https://management.azure.com$($policySetId)?api-version=2021-06-01"
+    $psetUri = "https://$($azureEnvironmentURI)$($policySetId)?api-version=2021-06-01"
     $policySet = (Invoke-AzRestMethod -Uri $psetUri -Method GET).Content | ConvertFrom-Json -Depth 100
     $policySet
     $policies = $policySet.properties.policyDefinitions
-    #iterate through the policies in the policy set
+
+    # Iterate through the policies in the policy set
+    If ($policyAssignmentObject.properties.policyDefinitionId -match "/providers/Microsoft.Authorization/policySetDefinitions/Alerting-ServiceHealth") {
+        $policyDefinitionReferenceId = "Deploy_ServiceHealth_ActionGroups"
+        Start-PolicyRemediation -azureEnvironmentURI $azureEnvironmentURI -managementGroupName $managementGroupName -policyAssignmentName $name -policyAssignmentId $policyAssignmentId -policyDefinitionReferenceId $policyDefinitionReferenceId
+        Write-Host " Waiting for 5 minutes while remediating the 'Deploy Service Health Action Group' policy before continuing." -ForegroundColor Cyan
+        Start-Sleep -Seconds 360
+    }
     Foreach ($policy in $policies) {
         $policyDefinitionId = $policy.policyDefinitionId
         $policyDefinitionReferenceId = $policy.policyDefinitionReferenceId
-        #trigger remediation for the individual policy
-        Start-PolicyRemediation -managementGroupName $managementGroupName -policyAssignmentName $name -polassignId $polassignId -policyDefinitionReferenceId $policyDefinitionReferenceId
+
+        # Trigger remediation for the individual policy
+        Start-PolicyRemediation -azureEnvironmentURI $azureEnvironmentURI -managementGroupName $managementGroupName -policyAssignmentName $name -policyAssignmentId $policyAssignmentId -policyDefinitionReferenceId $policyDefinitionReferenceId
     }
 }
 
-#Function to get specific information about a policy assignment for a single policy and trigger remediation
+# Function to get specific information about a policy assignment for a single policy and trigger remediation
 function Enumerate-Policy {
     param (
+        [Parameter(Mandatory = $true)] [string] $azureEnvironmentURI,
         [Parameter(Mandatory = $true)] [string] $managementGroupName,
         [Parameter(Mandatory = $true)] [object] $policyAssignmentObject
     )
-    #extract policy assignment information
-    $polassignId = $policyAssignmentObject.id
+    # Extract policy assignment information
+    $policyAssignmentId = $policyAssignmentObject.id
     $name = $policyAssignmentObject.name
     $policyDefinitionId = $policyAssignmentObject.properties.policyDefinitionId
-    Start-PolicyRemediation -managementGroupName $managementGroupName -policyAssignmentName $name -polassignId $polassignId
+    Start-PolicyRemediation -azureEnvironmentURI $azureEnvironmentURI -managementGroupName $managementGroupName -policyAssignmentName $name -policyAssignmentId $policyAssignmentId
 }
-#endregion
 
-#region connect to Azure
+# Connect to Azure
 Connect-AzAccount -Identity
-#endregion
 
-#region run policy remediation
-
+# Run policy remediation
+$problemsOccurred = $false
 foreach ($object in $policies) {
     $policy = $object.policyName
     $managementGroupName = $object.managementGroup
 
     Write-Host "Processing policy: $policy" -ForegroundColor Cyan
-    # If remediating the Alerting-ServiceHealth initiative, we will remediate the ALZ_ServiceHealth_ActionGroups first,
-    # wait for 5 minutes and then remediate the entire Alerting-ServiceHealth initiative.
-    If ($policy -eq 'Alerting-ServiceHealth') {
-        try {
-            Get-PolicyType -managementGroupName $managementGroupName -policyName 'ALZ_ServiceHealth_ActionGroups'
-        } catch {
-            write-error "Policy 'ALZ_ServiceHealth_ActionGroups' not found.`n$_"
-            $problemsOccurred = $true
-            continue
-        }
-            
-        Write-Host " Waiting for 5 minutes while remediating the 'Deploy Service Health Action Group' policy before continuing." -ForegroundColor Cyan
-        Start-Sleep -Seconds 360
-        try {
-            Get-PolicyType -managementGroupName $managementGroupName -policyName $policy
-        } catch {
-            write-error "Policy $policy not found.`n$_"
-            $problemsOccurred = $true
-            continue
-        }       
-    }
-    # Otherwise we just remediate everything passed in
-    Else {
-        write-output "find policy $policy and remediate"
-        try {
-            Get-PolicyType -managementGroupName $managementGroupName -policyName $policy
-        } catch {
-            write-error "Policy $policy not found.`n$_"
-            $problemsOccurred = $true
-            continue
-        }
+    try {
+        Get-PolicyType -azureEnvironmentURI $azureEnvironmentURI -managementGroupName $managementGroupName -policyName $policy
+    } catch {
+        write-error "Policy $policy not found.`n$_"
+        $problemsOccurred = $true
+        continue
     }
 }
 
@@ -216,4 +185,3 @@ if ($problemsOccurred) {
     "One or more policies failed to remediate"
     throw
 }
-#endregion
